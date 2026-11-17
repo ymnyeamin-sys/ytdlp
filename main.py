@@ -97,13 +97,14 @@ def download_by_resolution(resolution):
     if not url or not is_valid_youtube_url(url):
         return jsonify({"error": "Invalid or missing YouTube URL."}), 400
 
+    # ফরম্যাট ফলব্যাক লজিক (যা 'Requested format is not available' সমস্যা দূর করবে)
     if resolution == "audio":
-        format_str = "bestaudio[ext=m4a]/bestaudio/best"
+        format_str = "bestaudio/best"
     elif resolution == "highest":
-        format_str = "best[ext=mp4]/best"
+        format_str = "bestvideo+bestaudio/best"
     else:
         res_height = resolution.replace("p", "")
-        format_str = f"best[height<={res_height}][ext=mp4]/best[height<={res_height}]/best"
+        format_str = f"best[height<={res_height}]/bestvideo[height<={res_height}]+bestaudio/best[height<={res_height}]/best"
 
     try:
         with yt_dlp.YoutubeDL(get_ydl_opts({'format': format_str})) as ydl:
