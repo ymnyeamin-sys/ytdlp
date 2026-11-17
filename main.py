@@ -96,11 +96,14 @@ def download_by_resolution(resolution):
     if not url or not is_valid_youtube_url(url):
         return jsonify({"error": "Invalid or missing YouTube URL."}), 400
 
-    # একেবারে নিরাপদ ফলব্যাক ফরম্যাট (কোনো ত্রুটি আসবে না)
+    # একদম নিরাপদ এবং ফলব্যাক ফরম্যাট (Requested format error এড়াতে)
     if resolution == "audio":
         format_str = "bestaudio/best"
-    else:
+    elif resolution == "highest":
         format_str = "best/bestvideo+bestaudio"
+    else:
+        res_height = resolution.replace("p", "")
+        format_str = f"best[height<={res_height}]/best"
 
     try:
         with yt_dlp.YoutubeDL(get_ydl_opts({'format': format_str})) as ydl:
