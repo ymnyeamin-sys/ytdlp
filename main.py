@@ -1,122 +1,109 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS  # ১. CORS ইমপোর্ট করা হলো
-from pytubefix import YouTube
+from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
+import yt_dlp
+import os
 import re
 
 app = Flask(__name__)
-CORS(app)  # ২. CORS এনেবল করা হলো (যাতে যেকোনো ওয়েবসাইট থেকে রিকোয়েস্ট কাজ করে)
+CORS(app)
 
-def download_video(url, resolution):
-    try:
-        yt = YouTube(url)
-        
-        # Debug: Print all available streams
-        print(f"Available progressive streams for {url}:")
-        for stream in yt.streams.filter(progressive=True, file_extension='mp4'):
-            print(f"  - {stream.resolution} - {stream.mime_type}")
-        
-        stream = yt.streams.filter(progressive=True, file_extension='mp4', resolution=resolution).first()
-        if stream:
-            out_dir = f"./downloads/{url.split('v=')[1].split('&')[0]}"
-            import os
-            os.makedirs(out_dir, exist_ok=True)
-            stream.download(output_path=out_dir)
-            return True, None
-        else:
-            print(f"\nTrying non-progressive streams:")
-            for stream in yt.streams.filter(file_extension='mp4', res=resolution):
-                print(f"  - {stream.resolution} - {stream.mime_type} - audio: {stream.includes_audio_track}")
-            
-            return False, "Video with the specified resolution not found."
-    except Exception as e:
-        return False, str(e)
-
-def get_video_info(url):
-    try:
-        yt = YouTube(url)
-        stream = yt.streams.first()
-        video_info = {
-            "title": yt.title,
-            "author": yt.author,
-            "length": yt.length,
-            "views": yt.views,
-            "description": yt.description,
-            "publish_date": yt.publish_date,
-        }
-        return video_info, None
-    except Exception as e:
-        return None, str(e)
+DOWNLOAD_FOLDER = "./downloads"
+os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
 def is_valid_youtube_url(url):
-    pattern = r"^(https?://)?(www\.)?youtube\.com/watch\?v=[\w-]+(&\S*)?$"
+    pattern = r"^(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/)[\w-]+(\S*)?$"
     return re.match(pattern, url) is not None
-
-@app.route('/download/<resolution>', methods=['POST'])
-def download_by_resolution(resolution):
-    data = request.get_json()
-    url = data.get('url')
-    
-    if not url:
-        return jsonify({"error": "Missing 'url' parameter in the request body."}), 400
-
-    if not is_valid_youtube_url(url):
-        return jsonify({"error": "Invalid YouTube URL."}), 400
-    
-    success, error_message = download_video(url, resolution)
-    
-    if success:
-        return jsonify({"message": f"Video with resolution {resolution} downloaded successfully."}), 200
-    else:
-        return jsonify({"error": error_message}), 500
 
 @app.route('/video_info', methods=['POST'])
 def video_info():
     data = request.get_json()
     url = data.get('url')
     
-    if not url:
-        return jsonify({"error": "Missing 'url' parameter in the request body."}), 400
+    if not url or not is_valid_youtube_url(url):
+        return jsonify({"error": "Invalid or missing YouTube URL."}), 400
 
-    if not is_valid_youtube_url(url):
-        return jsonify({"error": "Invalid YouTube URL."}), 400
-    
-    video_info, error_message = get_video_info(url)
-    
-    if video_info:
-        return jsonify(video_info), 200
-    else:
-        return jsonify({"error": error_message}), 500
-
+    ydl_opts = {'extract_flat': False, 'skip_download': True}
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            video_data = {
+                "title": info.get('title'),
+                "author": info.get('uploader') or info.get('channel'),
+                "length": info.get('duration'),
+                "views": info.get('view_count'),
+                "description": info.get('description'),
+                "publish_date": info.get('upload_date'),
+            }
+            return jsonify(video_data), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/available_resolutions', methods=['POST'])
 def available_resolutions():
     data = request.get_json()
     url = data.get('url')
     
-    if not url:
-        return jsonify({"error": "Missing 'url' parameter in the request body."}), 400
+    if not url or not is_valid_youtube_url(url):
+        return jsonify({"error": "Invalid or missing YouTube URL."}), 400
 
-    if not is_valid_youtube_url(url):
-        return jsonify({"error": "Invalid YouTube URL."}), 400
-    
+    ydl_opts = {'extract_flat': False, 'skip_download': True}
     try:
-        yt = YouTube(url)
-        progressive_resolutions = list(set([
-            stream.resolution 
-            for stream in yt.streams.filter(progressive=True, file_extension='mp4')
-            if stream.resolution
-        ]))
-        all_resolutions = list(set([
-            stream.resolution 
-            for stream in yt.streams.filter(file_extension='mp4')
-            if stream.resolution
-        ]))
-        return jsonify({
-            "progressive": sorted(progressive_resolutions),
-            "all": sorted(all_resolutions)
-        }), 200
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            formats = info.get('formats', [])
+            
+            resolutions = set()
+            for f in formats:
+                if f.get('vcodec') != 'none' and f.get('resolution'):
+                    resolutions.add(f.get('resolution'))
+                    
+            return jsonify({
+                "progressive": sorted(list(resolutions)),
+                "all": sorted(list(resolutions))
+            }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/download/<resolution>', methods=['POST'])
+def download_by_resolution(resolution):
+    data = request.get_json()
+    url = data.get('url')
     
+    if not url or not is_valid_youtube_url(url):
+        return jsonify({"error": "Invalid or missing YouTube URL."}), 400
+
+    video_id = info_id = url.split("v=")[-1].split("&")[0] if "v=" in url else url.split("/")[-1]
+    output_template = os.path.join(DOWNLOAD_FOLDER, f"{video_id}_%(resolution)s.%(ext)s")
+
+    # yt-dlp format mapping
+    if resolution == "highest":
+        format_str = "bestvideo+bestaudio/best"
+    elif resolution == "audio":
+        format_str = "bestaudio/best"
+    else:
+        # যেমন 720p বা 360p এর জন্য
+        res_height = resolution.replace("p", "")
+        format_str = f"bestvideo[height<={res_height}]+bestaudio/best[height<={res_height}]"
+
+    ydl_opts = {
+        'format': format_str,
+        'outtmpl': output_template,
+        'merge_output_format': 'mp4',
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            if not filename.endswith('.mp4'):
+                filename = os.path.splitext(filename)[0] + '.mp4'
+            
+            if os.path.exists(filename):
+                return send_file(filename, as_attachment=True)
+            else:
+                return jsonify({"error": "Downloaded file not found."}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
     app.run(debug=True)
