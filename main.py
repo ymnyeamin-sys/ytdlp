@@ -75,15 +75,23 @@ def available_resolutions():
             info = ydl.extract_info(url, download=False)
             formats = info.get('formats', [])
             
-            resolutions = set()
+            progressive_res = set()
+            all_res = set()
+            
             for f in formats:
                 if f.get('vcodec') != 'none' and f.get('height'):
-                    resolutions.add(f"{f.get('height')}p")
+                    res_str = f"{f.get('height')}p"
+                    all_res.add(res_str)
+                    # আপনার pytubefix কোডের progressive লজিকের আদলে (যেখানে ভিডিও ও অডিও একসাথে থাকে)
+                    if f.get('acodec') != 'none':
+                        progressive_res.add(res_str)
             
-            sorted_res = sorted(list(resolutions), key=lambda x: int(x.replace('p', '')))
+            sorted_prog = sorted(list(progressive_res), key=lambda x: int(x.replace('p', '')))
+            sorted_all = sorted(list(all_res), key=lambda x: int(x.replace('p', '')))
+            
             return jsonify({
-                "progressive": sorted_res,
-                "all": sorted_res
+                "progressive": sorted_prog,
+                "all": sorted_all
             }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -96,14 +104,14 @@ def download_by_resolution(resolution):
     if not url or not is_valid_youtube_url(url):
         return jsonify({"error": "Invalid or missing YouTube URL."}), 400
 
-    # একদম নিরাপদ এবং ফলব্যাক ফরম্যাট (Requested format error এড়াতে)
+    # pytubefix স্টাইলের ফরম্যাট সিলেকশন ও ফলব্যাক
     if resolution == "audio":
-        format_str = "bestaudio/best"
+        format_str = "bestaudio[ext=m4a]/bestaudio/best"
     elif resolution == "highest":
-        format_str = "best/bestvideo+bestaudio"
+        format_str = "best[ext=mp4]/best"
     else:
         res_height = resolution.replace("p", "")
-        format_str = f"best[height<={res_height}]/best"
+        format_str = f"best[height<={res_height}][ext=mp4]/best[height<={res_height}]/best"
 
     try:
         with yt_dlp.YoutubeDL(get_ydl_opts({'format': format_str})) as ydl:
