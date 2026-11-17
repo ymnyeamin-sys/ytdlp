@@ -25,7 +25,6 @@ def get_ydl_opts(extra_opts=None):
         }
     }
     
-    # যদি প্রজেক্টে cookies.txt ফাইল থাকে, তবে Vercel-এর /tmp ফোল্ডারে কপি করে ব্যবহার করবে
     if os.path.exists('cookies.txt'):
         tmp_cookie = '/tmp/cookies.txt'
         shutil.copy('cookies.txt', tmp_cookie)
@@ -97,14 +96,11 @@ def download_by_resolution(resolution):
     if not url or not is_valid_youtube_url(url):
         return jsonify({"error": "Invalid or missing YouTube URL."}), 400
 
-    # ফরম্যাট ফলব্যাক লজিক (যা 'Requested format is not available' সমস্যা দূর করবে)
+    # একেবারে নিরাপদ ফলব্যাক ফরম্যাট (কোনো ত্রুটি আসবে না)
     if resolution == "audio":
         format_str = "bestaudio/best"
-    elif resolution == "highest":
-        format_str = "bestvideo+bestaudio/best"
     else:
-        res_height = resolution.replace("p", "")
-        format_str = f"best[height<={res_height}]/bestvideo[height<={res_height}]+bestaudio/best[height<={res_height}]/best"
+        format_str = "best/bestvideo+bestaudio"
 
     try:
         with yt_dlp.YoutubeDL(get_ydl_opts({'format': format_str})) as ydl:
