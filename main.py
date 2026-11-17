@@ -1,8 +1,10 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS  # ১. CORS ইমপোর্ট করা হলো
 from pytubefix import YouTube
 import re
 
 app = Flask(__name__)
+CORS(app)  # ২. CORS এনেবল করা হলো (যাতে যেকোনো ওয়েবসাইট থেকে রিকোয়েস্ট কাজ করে)
 
 def download_video(url, resolution):
     try:
