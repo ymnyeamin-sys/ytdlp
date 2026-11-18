@@ -1,3 +1,4 @@
+
 import os
 import re
 import base64
@@ -247,48 +248,6 @@ def is_video_format(fmt):
     )
 
 
-def estimate_size(fmt):
-    """
-    Real size if YouTube gives it. HLS formats (1080p, 720p...) have
-    no size, so estimate it: bitrate (kbit/s) x duration (s) / 8.
-    """
-
-    size = fmt.get("filesize") or fmt.get("filesize_approx")
-
-    if size:
-        return int(size)
-
-    duration = fmt.get("_duration")
-
-    bitrate = fmt.get("tbr") or (
-        (fmt.get("vbr") or 0) + (fmt.get("abr") or 0)
-    )
-
-    if duration and bitrate:
-        return int(bitrate * 1000 / 8 * float(duration))
-
-    return None
-
-
-def sizes_by_height(formats):
-    """{height: biggest known/estimated size in bytes}"""
-
-    sizes = {}
-
-    for fmt in formats:
-
-        height = fmt.get("height")
-        size = estimate_size(fmt)
-
-        if height and size:
-            sizes[str(int(height))] = max(
-                sizes.get(str(int(height)), 0),
-                size
-            )
-
-    return sizes
-
-
 def format_details(fmt):
 
     return {
@@ -299,9 +258,7 @@ def format_details(fmt):
         "ext": fmt.get("ext"),
         "fps": fmt.get("fps"),
 
-        "filesize": estimate_size(fmt),
-
-        "filesize_estimated": not bool(
+        "filesize": (
             fmt.get("filesize")
             or fmt.get("filesize_approx")
         ),
@@ -382,7 +339,6 @@ def extract_all_clients(url):
 
                 item = dict(fmt)
                 item["_client"] = client
-                item["_duration"] = info.get("duration")
 
                 all_formats.append(item)
 
@@ -690,8 +646,6 @@ def available_resolutions():
         "video_id": info.get("id") if info else None,
 
         "all": resolutions,
-
-        "sizes": sizes_by_height(formats),
 
         "progressive": progressive,
 
