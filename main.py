@@ -10,7 +10,7 @@ CORS(app)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIE_SRC = os.path.join(BASE_DIR, 'cookies.txt')
-APP_VERSION = "v6-js-debug"
+APP_VERSION = "v7-format-details"
 
 # Ekta ekta kore try hobe. Prothom je real format dibe seta-i use hobe.
 # web_safari + cookies age (bot-check paar hoy, kintu JS runtime lage).
@@ -254,7 +254,17 @@ def available_resolutions():
         return jsonify({
             "progressive": sorted_prog,
             "all": sorted_all,
-            "worked_with": log[-1]["clients"]
+            "worked_with": log[-1]["clients"],
+            "details": [
+                {
+                    "height": f.get('height'),
+                    "ext": f.get('ext'),
+                    "protocol": f.get('protocol'),
+                    "video": f.get('vcodec') != 'none',
+                    "audio": f.get('acodec') != 'none',
+                }
+                for f in formats if f.get('height')
+            ]
         }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -304,7 +314,15 @@ def download_by_resolution(resolution):
             "message": "Download link generated successfully.",
             "title": info.get('title'),
             "download_url": download_url,
-            "worked_with": log[-1]["clients"]
+            "worked_with": log[-1]["clients"],
+            "selected": {
+                "height": info.get('height'),
+                "ext": info.get('ext'),
+                "protocol": info.get('protocol'),
+                "video": info.get('vcodec') != 'none',
+                "audio": info.get('acodec') != 'none',
+                "format_id": info.get('format_id'),
+            }
         }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
