@@ -1,29 +1,25 @@
-
 FROM python:3.12-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-ENV PORT=8080
+ENV DENO_INSTALL=/root/.deno
+ENV PATH="/root/.deno/bin:${PATH}"
 
-# FFmpeg এবং Node.js ইনস্টল
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y \
+    curl \
+    ca-certificates \
     ffmpeg \
-    nodejs \
-    ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://deno.land/install.sh | sh
 
 WORKDIR /app
 
-# Python dependencies
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Project files
 COPY . .
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "waitress-serve --listen=0.0.0.0:${PORT:-8080} --threads=4 main:app"]
+CMD ["python", "main.py"]
