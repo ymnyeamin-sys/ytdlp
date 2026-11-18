@@ -8,6 +8,9 @@ import shutil
 app = Flask(__name__)
 CORS(app)
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+COOKIE_SRC = os.path.join(BASE_DIR, 'cookies.txt')
+
 
 def is_valid_youtube_url(url):
     pattern = r"^(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)[\w-]+(\S*)?$"
@@ -23,12 +26,11 @@ def get_ydl_opts(extra_opts=None):
         # format na pele-o video info return korbe
         'ignore_no_formats_error': True,
         'check_formats': False,
-        # player_client force kora hoyni, yt-dlp nijei best client bachbe
     }
 
-    if os.path.exists('cookies.txt'):
+    if os.path.exists(COOKIE_SRC):
         tmp_cookie = '/tmp/cookies.txt'
-        shutil.copy('cookies.txt', tmp_cookie)
+        shutil.copy(COOKIE_SRC, tmp_cookie)
         opts['cookiefile'] = tmp_cookie
 
     if extra_opts:
@@ -39,6 +41,18 @@ def get_ydl_opts(extra_opts=None):
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({"status": "API is running successfully!"}), 200
+
+
+@app.route('/debug', methods=['GET'])
+def debug():
+    return jsonify({
+        "yt_dlp_version": yt_dlp.version.__version__,
+        "cookies_exists": os.path.exists(COOKIE_SRC),
+        "cookies_size": os.path.getsize(COOKIE_SRC) if os.path.exists(COOKIE_SRC) else None,
+        "node": shutil.which('node'),
+        "deno": shutil.which('deno'),
+        "files": os.listdir(BASE_DIR),
+    }), 200
 
 
 @app.route('/video_info', methods=['POST'])
@@ -78,6 +92,15 @@ def available_resolutions():
         with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
             info = ydl.extract_info(url, download=False)
             formats = info.get('formats') or []
+
+            if not formats:
+                return jsonify({
+                    "error": "YouTube returned no formats for this server. "
+                             "Likely IP block, invalid cookies, or missing JS runtime (node/deno). "
+                             "Check /debug.",
+                    "progressive": [],
+                    "all": []
+                }), 502
 
             progressive_res = set()
             all_res = set()
@@ -131,7 +154,9 @@ def download_by_resolution(resolution):
                     download_url = requested[0].get('url')
 
             if not download_url:
-                return jsonify({"error": "No downloadable format found for this video."}), 404
+                return jsonify({
+                    "error": "No downloadable format found. Check /debug for cookies and JS runtime."
+                }), 404
 
             return jsonify({
                 "message": "Download link generated successfully.",
