@@ -10,7 +10,7 @@ CORS(app)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIE_SRC = os.path.join(BASE_DIR, 'cookies.txt')
-APP_VERSION = "v7-format-details"
+APP_VERSION = "v8-streams"
 
 # Ekta ekta kore try hobe. Prothom je real format dibe seta-i use hobe.
 # web_safari + cookies age (bot-check paar hoy, kintu JS runtime lage).
@@ -279,15 +279,20 @@ def download_by_resolution(resolution):
         return jsonify({"error": "Invalid or missing YouTube URL."}), 400
 
     # format selection ar fallback
+    # [protocol=https] = direct file (HLS/m3u8 playlist na)
     if resolution == "audio":
-        format_str = "bestaudio[ext=m4a]/bestaudio/best"
+        format_str = "bestaudio[ext=m4a][protocol=https]/bestaudio[protocol=https]"
     elif resolution == "highest":
-        format_str = "best[ext=mp4]/best"
+        format_str = "best[ext=mp4][protocol=https]/best[protocol=https]"
     else:
         res_height = resolution.replace("p", "")
         if not res_height.isdigit():
             return jsonify({"error": "Invalid resolution."}), 400
-        format_str = f"best[height<={res_height}][ext=mp4]/best[height<={res_height}]/best"
+        format_str = (
+            f"best[height<={res_height}][ext=mp4][protocol=https]/"
+            f"best[height<={res_height}][protocol=https]/"
+            f"best[protocol=https]"
+        )
 
     try:
         info, formats, log = extract_with_fallback(url, {'format': format_str})
@@ -323,6 +328,88 @@ def download_by_resolution(resolution):
                 "audio": info.get('acodec') != 'none',
                 "format_id": info.get('format_id'),
             }
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+def _file_info(f):
+    return {
+        "url": f.get('url'),
+        "height": f.get('height'),
+        "ext": f.get('ext'),
+        "vcodec": f.get('vcodec'),
+        "acodec": f.get('acodec'),
+        "bitrate_kbps": f.get('tbr') or f.get('abr'),
+        "filesize": f.get('filesize') or f.get('filesize_approx'),
+        "format_id": f.get('format_id'),
+    }
+
+
+@app.route('/streams/<resolution>', methods=['POST'])
+def streams(resolution):
+    """
+    App-er jonno: resolution ("highest" ba "720p", "1080p"...) er sobcheye bhalo
+    direct (https) video link + audio link dey.
+    - merge_required = true hole video ar audio alada, app-e jora lagate hobe.
+    - false hole "progressive" link-ei video+audio ache.
+    """
+    data = request.get_json(silent=True) or {}
+    url = data.get('url')
+
+    if not url or not is_valid_youtube_url(url):
+        return jsonify({"error": "Invalid or missing YouTube URL."}), 400
+
+    if resolution == "highest":
+        target = None
+    else:
+        h = resolution.replace("p", "")
+        if not h.isdigit():
+            return jsonify({"error": "Invalid resolution."}), 400
+        target = int(h)
+
+    try:
+        info, formats, log = extract_with_fallback(url)
+        if not formats:
+            return jsonify({"error": "No formats from any client.", "attempts": log}), 502
+
+        # shudhu direct https file (m3u8/dash playlist bad)
+        direct = [f for f in formats if f.get('protocol') == 'https' and f.get('url')]
+
+        def within(f):
+            return target is None or (f.get('height') or 0) <= target
+
+        def vkey(f):
+            # height beshi, tarpor mp4 (avc1) agey, tarpor bitrate
+            return (f.get('height') or 0, f.get('ext') == 'mp4', f.get('tbr') or 0)
+
+        video_only = [f for f in direct if f.get('vcodec') != 'none'
+                      and f.get('acodec') == 'none' and f.get('height') and within(f)]
+        progressive = [f for f in direct if f.get('vcodec') != 'none'
+                       and f.get('acodec') != 'none' and f.get('height') and within(f)]
+        audio_only = [f for f in direct if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
+
+        best_video = max(video_only, key=vkey) if video_only else None
+        best_prog = max(progressive, key=vkey) if progressive else None
+        best_audio = max(audio_only, key=lambda f: (f.get('ext') == 'm4a', f.get('abr') or 0)) if audio_only else None
+
+        if not best_video and not best_prog:
+            return jsonify({"error": "No direct video format found.", "attempts": log}), 404
+
+        # video-only jodi progressive-er cheye uchu hoy, tahole merge lagbe
+        merge_required = bool(
+            best_video and best_audio and
+            (not best_prog or (best_video.get('height') or 0) > (best_prog.get('height') or 0))
+        )
+
+        return jsonify({
+            "title": info.get('title'),
+            "requested": resolution,
+            "merge_required": merge_required,
+            "video": _file_info(best_video) if best_video else None,
+            "audio": _file_info(best_audio) if best_audio else None,
+            "progressive": _file_info(best_prog) if best_prog else None,
+            "worked_with": log[-1]["clients"],
         }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
