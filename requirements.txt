@@ -1,4 +1,3 @@
-Flask
-yt-dlp
-gunicorn
+flask
 flask-cors
+yt-dlp[default]
