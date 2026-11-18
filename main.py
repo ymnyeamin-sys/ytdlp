@@ -28,6 +28,12 @@ def get_ydl_opts(extra_opts=None):
         'check_formats': False,
     }
 
+    # JS runtime (node/deno) chhara kaj kore emon client gulo age try kore.
+    # Request body te "clients": ["android_vr", "tv_simply"] pathiye redeploy chhara test kora jay.
+    body = request.get_json(silent=True) or {}
+    clients = body.get('clients') or ['android_vr', 'tv_simply']
+    opts['extractor_args'] = {'youtube': {'player_client': clients}}
+
     if os.path.exists(COOKIE_SRC):
         tmp_cookie = '/tmp/cookies.txt'
         shutil.copy(COOKIE_SRC, tmp_cookie)
