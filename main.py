@@ -10,16 +10,41 @@ CORS(app)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIE_SRC = os.path.join(BASE_DIR, 'cookies.txt')
-APP_VERSION = "v4-fallback-chain"
+APP_VERSION = "v5-quickjs"
 
 # Ekta ekta kore try hobe. Prothom je real format dibe seta-i use hobe.
-# NOTE: android_vr/tv_simply/ios cookies support kore na, tai cookies chhara try kora hoy.
+# web_safari + cookies age (bot-check paar hoy, kintu JS runtime lage).
+# android_vr/tv_simply/ios cookies support kore na, tai cookies chhara try kora hoy.
 ATTEMPTS = [
+    {"clients": ["web_safari"], "cookies": True},
     {"clients": ["android_vr"], "cookies": False},
     {"clients": ["tv_simply"], "cookies": False},
     {"clients": ["ios"], "cookies": False},
-    {"clients": ["web_safari"], "cookies": True},
 ]
+
+# JS runtime: repo-r bin/qjs (QuickJS-NG, Linux x86_64) thakle use hobe.
+QJS_SRC = os.path.join(BASE_DIR, 'bin', 'qjs')
+QJS_TMP_DIR = '/tmp/jsrt'
+
+
+def setup_js_runtime():
+    """bin/qjs ke /tmp te copy kore executable banay, PATH e boshay. Path return kore, na thakle None."""
+    if not os.path.exists(QJS_SRC):
+        return None
+    try:
+        os.makedirs(QJS_TMP_DIR, exist_ok=True)
+        dst = os.path.join(QJS_TMP_DIR, 'qjs')
+        if not os.path.exists(dst):
+            shutil.copy(QJS_SRC, dst)
+            os.chmod(dst, 0o755)
+        if QJS_TMP_DIR not in os.environ.get('PATH', ''):
+            os.environ['PATH'] = QJS_TMP_DIR + os.pathsep + os.environ.get('PATH', '')
+        return dst
+    except Exception:
+        return None
+
+
+QJS_PATH = setup_js_runtime()
 
 
 class CaptureLogger:
@@ -57,6 +82,9 @@ def get_ydl_opts(extra_opts=None, clients=None, use_cookies=True):
         'check_formats': False,
         'logger': CaptureLogger(),
     }
+
+    if QJS_PATH:
+        opts['js_runtimes'] = {'quickjs': {'path': QJS_PATH}}
 
     if clients:
         opts['extractor_args'] = {'youtube': {'player_client': clients}}
@@ -127,6 +155,9 @@ def debug():
         "cookies_size": os.path.getsize(COOKIE_SRC) if os.path.exists(COOKIE_SRC) else None,
         "node": shutil.which('node'),
         "deno": shutil.which('deno'),
+        "qjs_in_repo": os.path.exists(QJS_SRC),
+        "qjs_ready": QJS_PATH,
+        "ejs_installed": __import__('importlib.util').util.find_spec('yt_dlp_ejs') is not None,
         "files": os.listdir(BASE_DIR),
     }), 200
 
