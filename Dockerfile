@@ -1,8 +1,8 @@
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1
-ENV DENO_INSTALL=/root/.deno
-ENV PATH="/root/.deno/bin:${PATH}"
+ENV DENO_INSTALL=/usr/local
+ENV PATH="/usr/local/bin:${PATH}"
 
 RUN apt-get update && apt-get install -y \
     curl \
@@ -18,7 +18,7 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY main.py .
 
 EXPOSE 8080
 
