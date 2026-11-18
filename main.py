@@ -1,11 +1,14 @@
+
 import os
 import re
-import json
 import base64
 import shutil
 import tempfile
 import subprocess
+import logging
+
 from pathlib import Path
+from importlib.metadata import version, PackageNotFoundError
 
 import yt_dlp
 
@@ -15,13 +18,13 @@ from waitress import serve
 
 
 # =====================================================
-# APP CONFIG
+# CONFIGURATION
 # =====================================================
 
 app = Flask(__name__)
 CORS(app)
 
-APP_VERSION = "v10-multi-client"
+APP_VERSION = "v11-multi-client"
 
 PORT = int(os.environ.get("PORT", 8080))
 
@@ -35,9 +38,12 @@ PLAYER_CLIENTS = [
     "ios"
 ]
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("youtube-api")
+
 
 # =====================================================
-# COOKIES
+# COOKIES MANAGEMENT
 # =====================================================
 
 def get_cookies_path():
@@ -52,7 +58,10 @@ def get_cookies_path():
     if cookies_b64:
 
         try:
-            cookies_data = base64.b64decode(cookies_b64)
+            cookies_data = base64.b64decode(
+                cookies_b64,
+                validate=True
+            )
 
             path = "/tmp/youtube_cookies.txt"
 
@@ -61,8 +70,8 @@ def get_cookies_path():
 
             return path
 
-        except Exception:
-            pass
+        except Exception as error:
+            logger.error("Cookies decode error: %s", error)
 
     default_path = "/app/cookies.txt"
 
@@ -73,14 +82,13 @@ def get_cookies_path():
 
 
 # =====================================================
-# SYSTEM DEBUG
+# SYSTEM INFORMATION
 # =====================================================
 
 def get_program_info(program):
 
     path = shutil.which(program)
-
-    version = None
+    program_version = None
 
     if path:
 
@@ -92,27 +100,41 @@ def get_program_info(program):
                 timeout=10
             )
 
-            version = output.strip()
+            program_version = output.strip()
 
-        except Exception:
-            pass
+        except Exception as error:
+            program_version = str(error)
 
     return {
         "path": path,
-        "version": version
+        "version": program_version
     }
 
 
 def get_yt_dlp_version():
 
     try:
-        return yt_dlp.version.__version__
+        return version("yt-dlp")
+
     except Exception:
         return "unknown"
 
 
+def is_ejs_installed():
+
+    try:
+        version("yt-dlp-ejs")
+        return True
+
+    except PackageNotFoundError:
+        return False
+
+    except Exception:
+        return False
+
+
 # =====================================================
-# REQUEST HELPERS
+# REQUEST VALIDATION
 # =====================================================
 
 def get_video_url():
@@ -126,28 +148,57 @@ def get_video_url():
 
     url = str(url).strip()
 
-    if not re.match(
-        r"^https?://(www\.)?(youtube\.com|youtu\.be|m\.youtube\.com)/",
-        url,
-        re.IGNORECASE
-    ):
+    pattern = (
+        r"^https?://"
+        r"(www\.)?(youtube\.com|youtu\.be|m\.youtube\.com)"
+        r"/"
+    )
+
+    if not re.match(pattern, url, re.IGNORECASE):
         return None
 
     return url
 
 
-def make_ydl_options(client, download=False):
+# =====================================================
+# YT-DLP LOGGER
+# =====================================================
+
+class YTDLPLogger:
+
+    def __init__(self):
+        self.messages = []
+
+    def debug(self, message):
+        pass
+
+    def info(self, message):
+        pass
+
+    def warning(self, message):
+        self.messages.append(str(message))
+
+    def error(self, message):
+        self.messages.append(str(message))
+
+
+# =====================================================
+# YT-DLP OPTIONS
+# =====================================================
+
+def make_ydl_options(client, download=False, resolution=1080):
 
     options = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "ignoreerrors": False,
-        "socket_timeout": 25,
+        "socket_timeout": 30,
         "retries": 2,
         "fragment_retries": 2,
         "extractor_retries": 2,
+
         "skip_download": not download,
+
         "extractor_args": {
             "youtube": {
                 "player_client": [client]
@@ -163,10 +214,20 @@ def make_ydl_options(client, download=False):
     if download:
 
         options.update({
-            "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+
+            "format": (
+                f"bestvideo[height<={resolution}]+bestaudio/"
+                f"best[height<={resolution}]/best"
+            ),
+
             "merge_output_format": "mp4",
-            "outtmpl": "%(title).150B.%(ext)s",
-            "max_filesize": MAX_DOWNLOAD_BYTES
+
+            "max_filesize": MAX_DOWNLOAD_BYTES,
+
+            "outtmpl": os.path.join(
+                tempfile.gettempdir(),
+                "%(id)s_%(title).100B.%(ext)s"
+            )
         })
 
     return options
@@ -178,9 +239,11 @@ def make_ydl_options(client, download=False):
 
 def is_video_format(fmt):
 
-    return (
-        fmt.get("vcodec")
-        and fmt.get("vcodec") != "none"
+    vcodec = fmt.get("vcodec")
+
+    return bool(
+        vcodec
+        and vcodec != "none"
         and fmt.get("height")
     )
 
@@ -194,36 +257,49 @@ def format_details(fmt):
         "resolution": fmt.get("resolution"),
         "ext": fmt.get("ext"),
         "fps": fmt.get("fps"),
-        "filesize": fmt.get("filesize") or fmt.get("filesize_approx"),
+
+        "filesize": (
+            fmt.get("filesize")
+            or fmt.get("filesize_approx")
+        ),
+
         "vcodec": fmt.get("vcodec"),
         "acodec": fmt.get("acodec"),
+
         "audio": bool(
             fmt.get("acodec")
             and fmt.get("acodec") != "none"
         ),
-        "protocol": fmt.get("protocol")
+
+        "protocol": fmt.get("protocol"),
+
+        "client": fmt.get("_client")
     }
 
 
 # =====================================================
-# MULTI CLIENT EXTRACTION
+# MULTI-CLIENT EXTRACTION
 # =====================================================
 
 def extract_all_clients(url):
 
     all_formats = []
     attempts = []
-    video_info = None
 
+    video_info = None
     seen = set()
 
     for client in PLAYER_CLIENTS:
 
-        messages = []
+        ydl_logger = YTDLPLogger()
+
+        real_formats = 0
 
         try:
 
             options = make_ydl_options(client)
+
+            options["logger"] = ydl_logger
 
             with yt_dlp.YoutubeDL(options) as ydl:
 
@@ -239,8 +315,6 @@ def extract_all_clients(url):
                 video_info = info
 
             formats = info.get("formats", [])
-
-            real_formats = 0
 
             for fmt in formats:
 
@@ -264,87 +338,113 @@ def extract_all_clients(url):
                 seen.add(key)
 
                 item = dict(fmt)
-
                 item["_client"] = client
 
                 all_formats.append(item)
 
             attempts.append({
+
                 "clients": [client],
+
                 "cookies": bool(get_cookies_path()),
+
                 "real_formats": real_formats,
-                "messages": messages
+
+                "messages": ydl_logger.messages
+
             })
 
         except Exception as error:
 
-            error_message = str(error)
-
-            messages.append(error_message)
+            messages = list(ydl_logger.messages)
+            messages.append(str(error))
 
             attempts.append({
+
                 "clients": [client],
+
                 "cookies": bool(get_cookies_path()),
+
                 "real_formats": 0,
+
                 "messages": messages
+
             })
 
     return video_info, all_formats, attempts
 
 
 # =====================================================
-# SELECT FORMAT
+# FORMAT SELECTION
 # =====================================================
 
 def select_formats(formats, resolution):
 
     video_formats = [
+
         fmt for fmt in formats
+
         if is_video_format(fmt)
+
         and int(fmt.get("height") or 0) <= resolution
+
     ]
 
     if not video_formats:
         return None, None
 
     video_formats.sort(
-        key=lambda x: (
-            int(x.get("height") or 0),
-            int(x.get("fps") or 0)
+
+        key=lambda fmt: (
+
+            int(fmt.get("height") or 0),
+
+            int(fmt.get("fps") or 0),
+
+            int(fmt.get("tbr") or 0)
+
         ),
+
         reverse=True
+
     )
 
     selected_video = video_formats[0]
 
-    progressive = [
-        fmt for fmt in video_formats
-        if fmt.get("acodec")
-        and fmt.get("acodec") != "none"
-    ]
-
     selected_audio = None
 
-    if not (
+    has_audio = (
         selected_video.get("acodec")
         and selected_video.get("acodec") != "none"
-    ):
+    )
+
+    if not has_audio:
 
         audio_formats = [
+
             fmt for fmt in formats
+
             if fmt.get("acodec")
             and fmt.get("acodec") != "none"
+
             and fmt.get("vcodec") == "none"
+
         ]
 
         if audio_formats:
 
             audio_formats.sort(
-                key=lambda x: (
-                    int(x.get("abr") or 0),
-                    int(x.get("asr") or 0)
+
+                key=lambda fmt: (
+
+                    int(fmt.get("abr") or 0),
+
+                    int(fmt.get("asr") or 0)
+
                 ),
+
                 reverse=True
+
             )
 
             selected_audio = audio_formats[0]
@@ -353,25 +453,38 @@ def select_formats(formats, resolution):
 
 
 # =====================================================
-# BASIC ROUTES
+# HOME
 # =====================================================
 
 @app.route("/", methods=["GET"])
 def home():
 
     return jsonify({
+
         "app_version": APP_VERSION,
+
         "status": "API is running successfully!"
+
     })
 
+
+# =====================================================
+# HEALTH
+# =====================================================
 
 @app.route("/health", methods=["GET"])
 def health():
 
     return jsonify({
+
         "status": "healthy"
+
     })
 
+
+# =====================================================
+# DEBUG
+# =====================================================
 
 @app.route("/debug", methods=["GET"])
 def debug():
@@ -383,26 +496,31 @@ def debug():
     ffprobe = get_program_info("ffprobe")
     node = get_program_info("node")
 
-    try:
-        import yt_dlp_ejs
-        ejs_installed = True
-    except Exception:
-        ejs_installed = False
-
     return jsonify({
+
         "app_version": APP_VERSION,
+
         "cookies_exists": bool(cookies),
+
         "cookies_size": (
             os.path.getsize(cookies)
             if cookies else 0
         ),
+
         "deno": deno["path"],
+
         "deno_version": deno["version"],
+
         "ffmpeg": ffmpeg["path"],
+
         "ffprobe": ffprobe["path"],
+
         "node": node["path"],
-        "yt_dlp_ejs_installed": ejs_installed,
+
+        "yt_dlp_ejs_installed": is_ejs_installed(),
+
         "yt_dlp_version": get_yt_dlp_version()
+
     })
 
 
@@ -416,8 +534,11 @@ def video_info_route():
     url = get_video_url()
 
     if not url:
+
         return jsonify({
+
             "error": "Valid YouTube URL is required"
+
         }), 400
 
     info, formats, attempts = extract_all_clients(url)
@@ -425,19 +546,31 @@ def video_info_route():
     if not info:
 
         return jsonify({
+
             "error": "Could not extract video information",
+
             "attempts": attempts
+
         }), 400
 
     return jsonify({
+
         "title": info.get("title"),
+
         "id": info.get("id"),
+
         "thumbnail": info.get("thumbnail"),
+
         "duration": info.get("duration"),
+
         "uploader": info.get("uploader"),
+
         "view_count": info.get("view_count"),
+
         "description": info.get("description"),
+
         "formats_count": len(formats)
+
     })
 
 
@@ -451,8 +584,11 @@ def available_resolutions():
     url = get_video_url()
 
     if not url:
+
         return jsonify({
+
             "error": "Valid YouTube URL is required"
+
         }), 400
 
     info, formats, attempts = extract_all_clients(url)
@@ -460,38 +596,63 @@ def available_resolutions():
     if not formats:
 
         return jsonify({
+
             "error": "No video formats were returned.",
+
             "all": [],
+
             "progressive": [],
+
             "attempts": attempts
+
         }), 400
 
     resolutions = sorted(
+
         {
+
             int(fmt["height"])
+
             for fmt in formats
+
             if fmt.get("height")
+
         },
+
         reverse=True
+
     )
 
     details = [
+
         format_details(fmt)
+
         for fmt in formats
+
     ]
 
     progressive = [
+
         item for item in details
+
         if item["audio"]
+
     ]
 
     return jsonify({
+
         "title": info.get("title") if info else None,
+
         "video_id": info.get("id") if info else None,
+
         "all": resolutions,
+
         "progressive": progressive,
+
         "formats": details,
+
         "attempts": attempts
+
     })
 
 
@@ -505,8 +666,11 @@ def streams(resolution):
     url = get_video_url()
 
     if not url:
+
         return jsonify({
+
             "error": "Valid YouTube URL is required"
+
         }), 400
 
     info, formats, attempts = extract_all_clients(url)
@@ -516,32 +680,52 @@ def streams(resolution):
     if not video:
 
         return jsonify({
+
             "error": "Requested resolution is not available",
+
             "attempts": attempts
+
         }), 404
 
     return jsonify({
+
         "title": info.get("title") if info else None,
+
         "resolution": video.get("height"),
+
         "video": {
+
             "format_id": video.get("format_id"),
+
             "url": video.get("url"),
+
             "ext": video.get("ext"),
+
             "filesize": video.get("filesize")
+
         },
+
         "audio": (
+
             {
+
                 "format_id": audio.get("format_id"),
+
                 "url": audio.get("url"),
+
                 "ext": audio.get("ext")
+
             }
+
             if audio else None
+
         )
+
     })
 
 
 # =====================================================
-# DOWNLOAD
+# DOWNLOAD ENGINE
 # =====================================================
 
 def download_video(resolution):
@@ -549,101 +733,165 @@ def download_video(resolution):
     url = get_video_url()
 
     if not url:
+
         return jsonify({
+
             "error": "Valid YouTube URL is required"
+
         }), 400
 
     if resolution < 1 or resolution > 4320:
+
         return jsonify({
+
             "error": "Invalid resolution"
+
         }), 400
 
     errors = []
 
     for client in PLAYER_CLIENTS:
 
-        temp_dir = tempfile.mkdtemp(prefix="ytdlp_")
+        temp_dir = tempfile.mkdtemp(
+            prefix="ytdlp_"
+        )
+
+        ydl_logger = YTDLPLogger()
 
         try:
 
             options = make_ydl_options(
+
                 client,
-                download=True
+
+                download=True,
+
+                resolution=resolution
+
             )
 
             options["outtmpl"] = os.path.join(
+
                 temp_dir,
-                "%(title).150B.%(ext)s"
+
+                "%(id)s_%(title).100B.%(ext)s"
+
             )
+
+            options["logger"] = ydl_logger
 
             with yt_dlp.YoutubeDL(options) as ydl:
 
-                info = ydl.extract_info(
+                ydl.extract_info(
+
                     url,
+
                     download=True
+
                 )
-
-                downloaded = ydl.prepare_filename(info)
-
-            candidates = list(Path(temp_dir).glob("*"))
 
             candidates = [
-                str(path)
-                for path in candidates
+
+                path for path in Path(temp_dir).glob("*")
+
                 if path.is_file()
+
                 and path.suffix.lower() in (
+
                     ".mp4",
+
                     ".mkv",
+
                     ".webm",
+
                     ".mov"
+
                 )
+
             ]
 
             if not candidates:
+
                 raise Exception(
                     "Downloaded file was not found"
                 )
 
-            file_path = candidates[0]
+            file_path = max(
 
-            if os.path.getsize(file_path) > MAX_DOWNLOAD_BYTES:
+                candidates,
+
+                key=lambda path: path.stat().st_size
+
+            )
+
+            file_size = file_path.stat().st_size
+
+            if file_size > MAX_DOWNLOAD_BYTES:
+
                 raise Exception(
                     "File exceeds maximum download size"
                 )
 
             response = send_file(
-                file_path,
+
+                str(file_path),
+
                 as_attachment=True,
-                download_name=os.path.basename(file_path),
-                mimetype="video/mp4"
+
+                download_name=file_path.name,
+
+                mimetype="application/octet-stream"
+
             )
 
             response.call_on_close(
+
                 lambda: shutil.rmtree(
+
                     temp_dir,
+
                     ignore_errors=True
+
                 )
+
             )
 
             return response
 
         except Exception as error:
 
+            messages = list(ydl_logger.messages)
+
+            messages.append(str(error))
+
             errors.append({
+
                 "client": client,
-                "error": str(error)
+
+                "messages": messages
+
             })
 
             shutil.rmtree(
+
                 temp_dir,
+
                 ignore_errors=True
+
             )
 
     return jsonify({
+
         "error": "Download failed with all available clients",
+
         "attempts": errors
+
     }), 400
 
+
+# =====================================================
+# DOWNLOAD ROUTES
+# =====================================================
 
 @app.route("/download/<int:resolution>", methods=["POST"])
 def download_route(resolution):
@@ -665,15 +913,31 @@ def download_file_route(resolution):
 def not_found(error):
 
     return jsonify({
+
         "error": "Endpoint not found"
+
     }), 404
+
+
+@app.errorhandler(405)
+def method_not_allowed(error):
+
+    return jsonify({
+
+        "error": "Method not allowed"
+
+    }), 405
 
 
 @app.errorhandler(500)
 def internal_error(error):
 
+    logger.exception("Internal server error")
+
     return jsonify({
+
         "error": "Internal server error"
+
     }), 500
 
 
@@ -683,16 +947,34 @@ def internal_error(error):
 
 if __name__ == "__main__":
 
-    print("Starting YouTube API...")
+    print("=" * 45)
+
+    print("YouTube API Starting")
+
     print("Version:", APP_VERSION)
+
     print("yt-dlp:", get_yt_dlp_version())
+
     print("Deno:", shutil.which("deno"))
+
     print("FFmpeg:", shutil.which("ffmpeg"))
+
+    print("FFprobe:", shutil.which("ffprobe"))
+
     print("Cookies:", bool(get_cookies_path()))
 
+    print("EJS:", is_ejs_installed())
+
+    print("=" * 45)
+
     serve(
+
         app,
+
         host="0.0.0.0",
+
         port=PORT,
+
         threads=8
+
     )
