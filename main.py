@@ -10,6 +10,26 @@ CORS(app)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIE_SRC = os.path.join(BASE_DIR, 'cookies.txt')
+APP_VERSION = "v3-clients-logger"
+
+
+class CaptureLogger:
+    """yt-dlp-er warning/error message jome rakhe, jate response-e dekhano jay."""
+
+    def __init__(self):
+        self.messages = []
+
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        self.messages.append(str(msg))
+
+    def error(self, msg):
+        self.messages.append(str(msg))
 
 
 def is_valid_youtube_url(url):
@@ -26,6 +46,7 @@ def get_ydl_opts(extra_opts=None):
         # format na pele-o video info return korbe
         'ignore_no_formats_error': True,
         'check_formats': False,
+        'logger': CaptureLogger(),
     }
 
     # JS runtime (node/deno) chhara kaj kore emon client gulo age try kore.
@@ -52,6 +73,7 @@ def home():
 @app.route('/debug', methods=['GET'])
 def debug():
     return jsonify({
+        "app_version": APP_VERSION,
         "yt_dlp_version": yt_dlp.version.__version__,
         "cookies_exists": os.path.exists(COOKIE_SRC),
         "cookies_size": os.path.getsize(COOKIE_SRC) if os.path.exists(COOKIE_SRC) else None,
@@ -95,15 +117,21 @@ def available_resolutions():
         return jsonify({"error": "Invalid or missing YouTube URL."}), 400
 
     try:
-        with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
+        opts = get_ydl_opts()
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            formats = info.get('formats') or []
+            # storyboard (thumbnail) format gulo bad, shudhu asol video/audio
+            formats = [
+                f for f in (info.get('formats') or [])
+                if f.get('vcodec') != 'none' or f.get('acodec') != 'none'
+            ]
 
             if not formats:
                 return jsonify({
-                    "error": "YouTube returned no formats for this server. "
-                             "Likely IP block, invalid cookies, or missing JS runtime (node/deno). "
-                             "Check /debug.",
+                    "error": "YouTube returned no real video/audio formats for this server. "
+                             "Likely IP block, invalid cookies, or missing JS runtime (node/deno).",
+                    "clients_used": opts['extractor_args']['youtube']['player_client'],
+                    "yt_dlp_messages": opts['logger'].messages,
                     "progressive": [],
                     "all": []
                 }), 502
