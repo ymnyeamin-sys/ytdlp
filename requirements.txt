@@ -1,5 +1,6 @@
 
-Flask>=3.0,<4
-flask-cors>=4.0,<6
+Flask
+flask-cors
+waitress
 yt-dlp[default]
-waitress>=3.0,<4
+yt-dlp-ejs
