@@ -1,4 +1,3 @@
-
 import os
 import re
 import base64
@@ -24,7 +23,7 @@ from waitress import serve
 app = Flask(__name__)
 CORS(app)
 
-APP_VERSION = "v13-audio-formats-size-estimates"
+APP_VERSION = "v12-audio-download"
 
 PORT = int(os.environ.get("PORT", 8080))
 
@@ -37,10 +36,6 @@ PLAYER_CLIENTS = [
     "tv_simply",
     "ios"
 ]
-
-# Extra clients are used only for metadata discovery. The download client
-# sequence above remains unchanged, preserving the tested download behavior.
-FORMAT_FALLBACK_CLIENTS = ["web", "mweb"]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("youtube-api")
@@ -190,7 +185,7 @@ class YTDLPLogger:
 # YT-DLP OPTIONS
 # =====================================================
 
-def make_ydl_options(client, download=False, resolution=1080, audio_only=False, use_cookies=True):
+def make_ydl_options(client, download=False, resolution=1080):
 
     options = {
         "quiet": True,
@@ -210,7 +205,7 @@ def make_ydl_options(client, download=False, resolution=1080, audio_only=False, 
         }
     }
 
-    cookies = get_cookies_path() if use_cookies else None
+    cookies = get_cookies_path()
 
     if cookies:
         options["cookiefile"] = cookies
@@ -218,25 +213,21 @@ def make_ydl_options(client, download=False, resolution=1080, audio_only=False, 
     if download:
 
         options.update({
-            "format": "bestaudio/best" if audio_only else (
+
+            "format": (
                 f"bestvideo[height<={resolution}]+bestaudio/"
                 f"best[height<={resolution}]/best"
             ),
+
+            "merge_output_format": "mp4",
+
             "max_filesize": MAX_DOWNLOAD_BYTES,
+
             "outtmpl": os.path.join(
                 tempfile.gettempdir(),
                 "%(id)s_%(title).100B.%(ext)s"
             )
         })
-
-        if not audio_only:
-            options["merge_output_format"] = "mp4"
-        else:
-            options["postprocessors"] = [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192"
-            }]
 
     return options
 
@@ -256,54 +247,52 @@ def is_video_format(fmt):
     )
 
 
-def format_details(fmt, duration=None):
+def is_audio_format(fmt):
 
-    # Prefer yt-dlp's real or approximate size when available.
-    known_size = fmt.get("filesize") or fmt.get("filesize_approx")
-    size = known_size
-    size_source = "filesize" if fmt.get("filesize") else (
-        "filesize_approx" if fmt.get("filesize_approx") else None
+    acodec = fmt.get("acodec")
+
+    return bool(
+        acodec
+        and acodec != "none"
+        and fmt.get("vcodec") == "none"
     )
-    size_is_estimate = bool(fmt.get("filesize_approx") and not fmt.get("filesize"))
 
-    # HLS/DASH formats often do not expose a size. Estimate it from the
-    # bitrate and duration, and clearly mark it as an estimate.
-    if not size and duration:
-        bitrate_kbps = fmt.get("tbr")
 
-        if not bitrate_kbps:
-            video_bitrate = fmt.get("vbr") or 0
-            audio_bitrate = fmt.get("abr") or 0
-            bitrate_kbps = video_bitrate + audio_bitrate
+def format_details(fmt):
 
-        try:
-            if bitrate_kbps and float(bitrate_kbps) > 0:
-                size = int(float(duration) * float(bitrate_kbps) * 1000 / 8)
-                size_source = "bitrate_duration_estimate"
-                size_is_estimate = True
-        except (TypeError, ValueError, OverflowError):
-            size = None
-            size_source = None
-            size_is_estimate = False
+    filesize = (
+        fmt.get("filesize")
+        or fmt.get("filesize_approx")
+    )
 
     return {
+
         "format_id": fmt.get("format_id"),
+
         "height": fmt.get("height"),
+
         "width": fmt.get("width"),
+
         "resolution": fmt.get("resolution"),
+
         "ext": fmt.get("ext"),
+
         "fps": fmt.get("fps"),
-        "tbr": fmt.get("tbr"),
-        "abr": fmt.get("abr"),
 
-        "filesize": size,
-        "filesize_mb": round(size / (1024 * 1024), 2) if size else None,
-        "filesize_gb": round(size / (1024 * 1024 * 1024), 3) if size else None,
-        "filesize_is_estimate": size_is_estimate,
-        "filesize_source": size_source,
+        "filesize": filesize,
 
-        "video": bool(fmt.get("vcodec") and fmt.get("vcodec") != "none"),
+        "filesize_mb": (
+            round(filesize / (1024 * 1024), 2)
+            if filesize else None
+        ),
+
+        "filesize_gb": (
+            round(filesize / (1024 ** 3), 3)
+            if filesize else None
+        ),
+
         "vcodec": fmt.get("vcodec"),
+
         "acodec": fmt.get("acodec"),
 
         "audio": bool(
@@ -312,7 +301,9 @@ def format_details(fmt, duration=None):
         ),
 
         "protocol": fmt.get("protocol"),
+
         "client": fmt.get("_client")
+
     }
 
 
@@ -323,23 +314,24 @@ def format_details(fmt, duration=None):
 def extract_all_clients(url):
 
     all_formats = []
+    all_audio_formats = []
+
     attempts = []
 
     video_info = None
+
     seen = set()
+    seen_audio = set()
 
-    metadata_clients = PLAYER_CLIENTS + FORMAT_FALLBACK_CLIENTS
-
-    for client in metadata_clients:
+    for client in PLAYER_CLIENTS:
 
         ydl_logger = YTDLPLogger()
-        use_cookies = (client == "web_safari")
 
         real_formats = 0
 
         try:
 
-            options = make_ydl_options(client, use_cookies=use_cookies)
+            options = make_ydl_options(client)
 
             options["logger"] = ydl_logger
 
@@ -360,39 +352,54 @@ def extract_all_clients(url):
 
             for fmt in formats:
 
-                has_video = bool(fmt.get("vcodec") and fmt.get("vcodec") != "none")
-                has_audio = bool(fmt.get("acodec") and fmt.get("acodec") != "none")
+                if is_video_format(fmt):
 
-                # Keep video formats and audio-only formats; ignore unusable entries.
-                if not has_video and not has_audio:
-                    continue
+                    real_formats += 1
 
-                real_formats += 1
+                    key = (
+                        str(fmt.get("format_id")),
+                        str(fmt.get("height")),
+                        str(fmt.get("ext")),
+                        str(fmt.get("vcodec")),
+                        str(fmt.get("acodec")),
+                        str(fmt.get("protocol"))
+                    )
 
-                key = (
-                    str(fmt.get("format_id")),
-                    str(fmt.get("height")),
-                    str(fmt.get("ext")),
-                    str(fmt.get("vcodec")),
-                    str(fmt.get("acodec")),
-                    str(fmt.get("protocol"))
-                )
+                    if key in seen:
+                        continue
 
-                if key in seen:
-                    continue
+                    seen.add(key)
 
-                seen.add(key)
+                    item = dict(fmt)
+                    item["_client"] = client
 
-                item = dict(fmt)
-                item["_client"] = client
+                    all_formats.append(item)
 
-                all_formats.append(item)
+                elif is_audio_format(fmt):
+
+                    audio_key = (
+                        str(fmt.get("format_id")),
+                        str(fmt.get("ext")),
+                        str(fmt.get("acodec")),
+                        str(fmt.get("abr")),
+                        str(fmt.get("protocol"))
+                    )
+
+                    if audio_key in seen_audio:
+                        continue
+
+                    seen_audio.add(audio_key)
+
+                    audio_item = dict(fmt)
+                    audio_item["_client"] = client
+
+                    all_audio_formats.append(audio_item)
 
             attempts.append({
 
                 "clients": [client],
 
-                "cookies": bool(get_cookies_path()) if use_cookies else False,
+                "cookies": bool(get_cookies_path()),
 
                 "real_formats": real_formats,
 
@@ -409,13 +416,16 @@ def extract_all_clients(url):
 
                 "clients": [client],
 
-                "cookies": bool(get_cookies_path()) if use_cookies else False,
+                "cookies": bool(get_cookies_path()),
 
                 "real_formats": 0,
 
                 "messages": messages
 
             })
+
+    if video_info:
+        video_info["_audio_formats"] = all_audio_formats
 
     return video_info, all_formats, attempts
 
@@ -669,24 +679,28 @@ def available_resolutions():
 
     )
 
-    duration = info.get("duration") if info else None
-
     details = [
 
-        format_details(fmt, duration=duration)
+        format_details(fmt)
 
         for fmt in formats
 
     ]
 
     progressive = [
+
         item for item in details
-        if item["video"] and item["audio"]
+
+        if item["audio"]
+
     ]
 
     audio_formats = [
-        item for item in details
-        if item["audio"] and not item["video"]
+
+        format_details(fmt)
+
+        for fmt in (info.get("_audio_formats", []) if info else [])
+
     ]
 
     return jsonify({
@@ -699,11 +713,9 @@ def available_resolutions():
 
         "progressive": progressive,
 
-        "audio_formats": audio_formats,
-
-        "audio_formats_count": len(audio_formats),
-
         "formats": details,
+
+        "audio_formats": audio_formats,
 
         "attempts": attempts
 
@@ -944,7 +956,7 @@ def download_video(resolution):
 
 
 # =====================================================
-# AUDIO DOWNLOAD ENGINE (MP3)
+# AUDIO DOWNLOAD ENGINE
 # =====================================================
 
 def download_audio():
@@ -952,66 +964,161 @@ def download_audio():
     url = get_video_url()
 
     if not url:
-        return jsonify({"error": "Valid YouTube URL is required"}), 400
 
-    if not shutil.which("ffmpeg"):
-        return jsonify({"error": "FFmpeg is required for MP3 audio conversion"}), 500
+        return jsonify({
+
+            "error": "Valid YouTube URL is required"
+
+        }), 400
 
     errors = []
 
     for client in PLAYER_CLIENTS:
-        temp_dir = tempfile.mkdtemp(prefix="ytdlp_audio_")
+
+        temp_dir = tempfile.mkdtemp(
+            prefix="ytdlp_audio_"
+        )
+
         ydl_logger = YTDLPLogger()
 
         try:
+
             options = make_ydl_options(
+
                 client,
-                download=True,
-                audio_only=True
+
+                download=True
+
             )
+
+            # Audio only
+            options["format"] = "bestaudio/best"
+
+            # Remove video merge settings
+            options.pop("merge_output_format", None)
+
+            # Audio output
             options["outtmpl"] = os.path.join(
+
                 temp_dir,
+
                 "%(id)s_%(title).100B.%(ext)s"
+
             )
+
+            # MP3 conversion
+            options["postprocessors"] = [
+
+                {
+
+                    "key": "FFmpegExtractAudio",
+
+                    "preferredcodec": "mp3",
+
+                    "preferredquality": "192"
+
+                }
+
+            ]
+
             options["logger"] = ydl_logger
 
             with yt_dlp.YoutubeDL(options) as ydl:
-                ydl.extract_info(url, download=True)
+
+                ydl.extract_info(
+
+                    url,
+
+                    download=True
+
+                )
 
             candidates = [
+
                 path for path in Path(temp_dir).glob("*")
-                if path.is_file() and path.suffix.lower() == ".mp3"
+
+                if path.is_file()
+
+                and path.suffix.lower() == ".mp3"
+
             ]
 
             if not candidates:
-                raise Exception("Converted MP3 file was not found")
 
-            file_path = max(candidates, key=lambda path: path.stat().st_size)
+                raise Exception(
+                    "MP3 file was not generated"
+                )
+
+            file_path = max(
+
+                candidates,
+
+                key=lambda path: path.stat().st_size
+
+            )
+
             file_size = file_path.stat().st_size
 
             if file_size > MAX_DOWNLOAD_BYTES:
-                raise Exception("Audio file exceeds maximum download size")
+
+                raise Exception(
+                    "Audio file exceeds maximum download size"
+                )
 
             response = send_file(
+
                 str(file_path),
+
                 as_attachment=True,
+
                 download_name=file_path.name,
+
                 mimetype="audio/mpeg"
+
             )
+
             response.call_on_close(
-                lambda: shutil.rmtree(temp_dir, ignore_errors=True)
+
+                lambda: shutil.rmtree(
+
+                    temp_dir,
+
+                    ignore_errors=True
+
+                )
+
             )
+
             return response
 
         except Exception as error:
+
             messages = list(ydl_logger.messages)
+
             messages.append(str(error))
-            errors.append({"client": client, "messages": messages})
-            shutil.rmtree(temp_dir, ignore_errors=True)
+
+            errors.append({
+
+                "client": client,
+
+                "messages": messages
+
+            })
+
+            shutil.rmtree(
+
+                temp_dir,
+
+                ignore_errors=True
+
+            )
 
     return jsonify({
+
         "error": "Audio download failed with all available clients",
+
         "attempts": errors
+
     }), 400
 
 
@@ -1030,6 +1137,10 @@ def download_file_route(resolution):
 
     return download_video(resolution)
 
+
+# =====================================================
+# AUDIO DOWNLOAD ROUTE
+# =====================================================
 
 @app.route("/download_audio", methods=["POST"])
 def download_audio_route():
