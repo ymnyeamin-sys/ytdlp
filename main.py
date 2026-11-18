@@ -10,7 +10,7 @@ CORS(app)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIE_SRC = os.path.join(BASE_DIR, 'cookies.txt')
-APP_VERSION = "v5-quickjs"
+APP_VERSION = "v6-js-debug"
 
 # Ekta ekta kore try hobe. Prothom je real format dibe seta-i use hobe.
 # web_safari + cookies age (bot-check paar hoy, kintu JS runtime lage).
@@ -50,11 +50,16 @@ QJS_PATH = setup_js_runtime()
 class CaptureLogger:
     """yt-dlp-er warning/error message jome rakhe, jate response-e dekhano jay."""
 
+    KEYWORDS = ('js ', 'javascript', 'runtime', 'quickjs', 'qjs', 'ejs', 'solver', 'challenge', 'deno', 'node')
+
     def __init__(self):
         self.messages = []
+        self.debug_msgs = []
 
     def debug(self, msg):
-        pass
+        m = str(msg)
+        if any(k in m.lower() for k in self.KEYWORDS) and len(self.debug_msgs) < 40:
+            self.debug_msgs.append(m[:300])
 
     def info(self, msg):
         pass
@@ -80,6 +85,7 @@ def get_ydl_opts(extra_opts=None, clients=None, use_cookies=True):
         # format na pele-o video info return korbe
         'ignore_no_formats_error': True,
         'check_formats': False,
+        'verbose': True,  # JS runtime-er debug log paoar jonno (CaptureLogger filter kore)
         'logger': CaptureLogger(),
     }
 
@@ -129,6 +135,7 @@ def extract_with_fallback(url, extra_opts=None):
                 info = ydl.extract_info(url, download=False)
             formats = real_formats(info)
             entry["messages"] = opts['logger'].messages
+            entry["js_debug"] = opts['logger'].debug_msgs
             entry["real_formats"] = len(formats)
             log.append(entry)
             if formats:
@@ -160,6 +167,28 @@ def debug():
         "ejs_installed": __import__('importlib.util').util.find_spec('yt_dlp_ejs') is not None,
         "files": os.listdir(BASE_DIR),
     }), 200
+
+
+@app.route('/debug_js', methods=['GET'])
+def debug_js():
+    """qjs binary sotti ei server-e chole kina test kore."""
+    import subprocess
+    info = {"qjs_path": QJS_PATH, "path_env": os.environ.get('PATH', '')[:200]}
+    if QJS_PATH:
+        try:
+            info["size_bytes"] = os.path.getsize(QJS_PATH)
+            with open(QJS_PATH, 'rb') as f:
+                info["first_bytes_hex"] = f.read(4).hex()  # Linux binary hole 7f454c46
+            p = subprocess.run([QJS_PATH, '-e', 'console.log(1+1)'],
+                               capture_output=True, text=True, timeout=10)
+            info["returncode"] = p.returncode
+            info["stdout"] = p.stdout[-300:]
+            info["stderr"] = p.stderr[-300:]
+            p2 = subprocess.run([QJS_PATH, '--help'], capture_output=True, text=True, timeout=10)
+            info["help_first_line"] = (p2.stdout or p2.stderr).splitlines()[:2]
+        except Exception as e:
+            info["error"] = repr(e)
+    return jsonify(info), 200
 
 
 @app.route('/video_info', methods=['POST'])
